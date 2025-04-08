@@ -406,7 +406,7 @@ class ContextAwareChatbot:
         Initialize the chatbot with Groq API and ChromaDB configuration
         """
         # Initialize Groq client
-        self.groq_client = Groq(api_key=groq_api_key)
+        self.groq_client = Groq(api_key="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")
 
         # Initialize ChromaDB client
         self.chroma_client = chromadb.PersistentClient(path=chroma_db_path)
