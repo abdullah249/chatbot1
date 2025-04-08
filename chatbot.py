@@ -379,23 +379,23 @@
 
 
 
-
-
 __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
+
+
+import streamlit as st
 import os
 import chromadb
-from chromadb.config import Settings
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from groq import Groq
-from typing import List
+from typing import List, Dict
+from sentence_transformers import SentenceTransformer
 
-class Chatbot:
+class ContextAwareChatbot:
     def __init__(
         self,
-        groq_api_key: str = "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",  # Directly inserted key
+        groq_api_key: str,
         chroma_db_path: str = './chroma_storage',
         collection_name: str = 'document_collection',
         max_context_tokens: int = 1000
@@ -403,56 +403,118 @@ class Chatbot:
         """
         Initialize the chatbot with Groq API and ChromaDB configuration
         """
-        self.client = Groq(api_key=groq_api_key)
-        self.chroma_client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory=chroma_db_path))
+        # Initialize Groq client
+        self.groq_client = Groq(api_key="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")
 
-        self.embedding_function = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        self.collection = self.chroma_client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=self.embedding_function
-        )
+        # Initialize ChromaDB client
+        self.chroma_client = chromadb.PersistentClient(path=chroma_db_path)
+        self.collection = self.chroma_client.get_collection(name=collection_name)
 
+        # Conversation history
+        self.conversation_history: List[Dict[str, str]] = []
         self.max_context_tokens = max_context_tokens
 
-    def add_document(self, doc_id: str, content: str, metadata: dict = {}):
-        """
-        Add a document to the ChromaDB collection
-        """
-        self.collection.add(documents=[content], ids=[doc_id], metadatas=[metadata])
+        # Load embedding model
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-    def query_documents(self, query: str, n_results: int = 5):
+    def _retrieve_relevant_context(self, query: str, top_k: int = 3) -> List[str]:
         """
-        Retrieve top documents related to the query from ChromaDB
+        Retrieve relevant context from ChromaDB based on query
         """
-        results = self.collection.query(query_texts=[query], n_results=n_results)
-        return results.get("documents", [[]])[0]
+        query_embedding = self.embedding_model.encode([query])[0].tolist()
+        results = self.collection.query(query_embeddings=[query_embedding], n_results=top_k)
+        return results['documents'][0] if results['documents'] else []
 
-    def construct_prompt(self, context_docs: List[str], question: str):
+    def _manage_conversation_history(self, new_message: Dict[str, str]) -> List[Dict[str, str]]:
         """
-        Construct a prompt using retrieved documents and the user's question
+        Maintain history within token limits
         """
-        context = "\n\n".join(context_docs)
-        prompt = f"""You are a helpful assistant. Use the following context to answer the question:\n\n{context}\n\nQuestion: {question}\nAnswer:"""
-        return prompt
+        self.conversation_history.append(new_message)
+        while len(str(self.conversation_history)) > self.max_context_tokens:
+            self.conversation_history.pop(0)
+        return self.conversation_history
 
-    def ask(self, question: str, model: str = "mixtral-8x7b-32768", n_results: int = 5) -> str:
+    def chat(self, user_query: str) -> str:
         """
-        Ask a question to the chatbot. It retrieves documents, constructs a prompt, and queries the model.
+        Main chat method to handle a user query and return a response
         """
-        context_docs = self.query_documents(question, n_results=n_results)
-        prompt = self.construct_prompt(context_docs, question)
+        relevant_contexts = self._retrieve_relevant_context(user_query)
+        context_str = "\n".join([f"Context {i+1}: {ctx}" for i, ctx in enumerate(relevant_contexts)])
 
-        chat_completion = self.client.chat.completions.create(
-            model=model,
-            messages=[ 
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=1024
-        )
+        history_str = "\n".join([
+            f"{msg['role'].capitalize()}: {msg['content']}"
+            for msg in self._manage_conversation_history({'role': 'user', 'content': user_query})
+        ])
 
-        return chat_completion.choices[0].message.content
+        full_prompt = f"""
+        Relevant Document Contexts:
+        {context_str}
+
+        Conversation History:
+        {history_str}
+
+        Please provide a helpful and concise response to the latest user query,
+        leveraging the context from retrieved documents and conversation history.
+        """
+
+        try:
+            chat_completion = self.groq_client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant."},
+                    {"role": "user", "content": full_prompt}
+                ],
+                model="llama3-8b-8192"
+            )
+            response = chat_completion.choices[0].message.content
+            self._manage_conversation_history({'role': 'assistant', 'content': response})
+            return response
+
+        except Exception as e:
+            return f"An error occurred: {str(e)}"
+
+# Streamlit App
+def main():
+    st.set_page_config(page_title="Context-Aware Chatbot", page_icon="💬")
+    st.title("🤖 Context-Aware Document Chatbot")
+    st.write("Ask questions and receive answers based on your document knowledge base.")
+
+    # API Key input
+    groq_api_key = "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"
+
+    if groq_api_key:
+        try:
+            chatbot = ContextAwareChatbot(
+                groq_api_key=groq_api_key,
+                chroma_db_path='./chroma_storage',
+                collection_name='technical_docs'
+            )
+
+            if 'messages' not in st.session_state:
+                st.session_state.messages = []
+
+            # Show chat history
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+            # Chat input
+            if prompt := st.chat_input("What would you like to ask?"):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+
+                with st.chat_message("assistant"):
+                    response = chatbot.chat(prompt)
+                    st.markdown(response)
+
+                st.session_state.messages.append({"role": "assistant", "content": response})
+
+        except Exception as e:
+            st.error(f"Chatbot initialization error: {e}")
+
+if __name__ == "__main__":
+    main()
+
 
     def persist(self):
         """
