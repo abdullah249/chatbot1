@@ -453,8 +453,8 @@ class ContextAwareChatbot:
         Conversation History:
         {history_str}
 
-        Please provide a helpful and concise response to the latest user query,
-        leveraging the context from retrieved documents and conversation history.
+        You are going to act as a product recommendation expert. Please provide a helpful and concise response to the latest user query,
+        leveraging the context from retrieved documents and conversation history. The reponse should be within 20-30 words. 
         """
 
         try:
